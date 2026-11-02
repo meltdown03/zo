@@ -16,18 +16,47 @@ const path = require("path");
 const outDir = path.resolve(process.argv[2]);
 process.chdir(__dirname + "/..");
 fs.mkdirSync(outDir, { recursive: true });
+
+const SDK_NAME = "@zowe/zowex-for-zowe-sdk";
+const sdkVersion = JSON.parse(fs.readFileSync(path.join("packages", "sdk", "package.json"), "utf8")).version;
+const sdkTarball = path.join(outDir, `zowe-zowex-for-zowe-sdk-${sdkVersion}.tgz`);
+if (!fs.existsSync(sdkTarball)) {
+    throw new Error(`Missing ${sdkTarball}. Package the SDK before the CLI.`);
+}
+
 const tempDir = fs.mkdtempSync("build-");
 
 try {
     const execOptions = { cwd: tempDir, stdio: "inherit" };
     fs.cpSync(path.join("packages", "cli"), tempDir, { recursive: true });
-    fs.copyFileSync("package-lock.json", path.join(tempDir, "npm-shrinkwrap.json"));
+    const shrinkwrapPath = path.join(tempDir, "npm-shrinkwrap.json");
+    fs.copyFileSync("package-lock.json", shrinkwrapPath);
+
+    // 1.1.0 is not on the registry. Install the tarball already packed into dist.
+    const tempPkgPath = path.join(tempDir, "package.json");
+    const originalPkg = fs.readFileSync(tempPkgPath);
+    const tempPkg = JSON.parse(originalPkg);
+    tempPkg.dependencies[SDK_NAME] = `file:${sdkTarball}`;
+    fs.writeFileSync(tempPkgPath, `${JSON.stringify(tempPkg, null, 2)}\n`);
+
+    const shrinkwrap = JSON.parse(fs.readFileSync(shrinkwrapPath, "utf8"));
+    const sdkMeta = shrinkwrap.packages["packages/sdk"];
+    shrinkwrap.packages[`node_modules/${SDK_NAME}`] = {
+        version: sdkVersion,
+        resolved: `file:${sdkTarball}`,
+        license: sdkMeta.license,
+        dependencies: sdkMeta.dependencies,
+        optionalDependencies: sdkMeta.optionalDependencies,
+        peerDependencies: sdkMeta.peerDependencies,
+    };
+    shrinkwrap.packages["packages/cli"].dependencies[SDK_NAME] = `file:${sdkTarball}`;
+    fs.writeFileSync(shrinkwrapPath, `${JSON.stringify(shrinkwrap)}\n`);
+
     execSync("npm install --ignore-scripts", execOptions);
 
-    const sdkDir = path.join("node_modules", "@zowe/zowex-for-zowe-sdk");
-    // npm 12 installs this workspace link as a directory. unlink only removes a symlink.
-    fs.rmSync(path.join(tempDir, sdkDir), { recursive: true, force: true });
-    fs.cpSync(fs.realpathSync(sdkDir), path.join(tempDir, sdkDir), { recursive: true });
+    // The published manifest should depend on the version, not this machine's dist path.
+    fs.writeFileSync(tempPkgPath, originalPkg);
+    fs.copyFileSync("package-lock.json", shrinkwrapPath);
     fs.rmSync(path.join(tempDir, "node_modules", "cpu-features"), { recursive: true, force: true });
     fs.rmSync(path.join(tempDir, "node_modules", "russh"), { recursive: true, force: true });
     execSync(`npm pack --pack-destination="${outDir}"`, execOptions);
